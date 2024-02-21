@@ -16,10 +16,7 @@ import { StoreKeys, StoreSchema } from "./Store/storeConfig";
 // import contextMenus from "./contextMenus";
 import * as lancedb from "vectordb";
 import * as fs from "fs";
-import { LanceDBTableWrapper } from "./database/LanceTableWrapper";
-import { FSWatcher } from "fs";
 import {
-  GetFilesInfoTree,
   startWatchingDirectory,
   updateFileListForRenderer,
 } from "./Files/Filesystem";
@@ -29,6 +26,13 @@ import { registerDBSessionHandlers } from "./database/dbSessionHandlers";
 import { registerStoreHandlers } from "./Store/storeHandlers";
 import { registerFileHandlers } from "./Files/registerFilesHandler";
 import { RepopulateTableWithMissingItems } from "./database/TableHelperFunctions";
+import {
+  getVaultDirectoryForContents,
+  getWindowInfoForContents,
+  activeWindows,
+  getNextWindowPosition,
+  getWindowSize,
+} from "./windowManager";
 
 const store = new Store<StoreSchema>();
 // store.clear(); // clear store for testing
@@ -50,19 +54,19 @@ if (!app.requestSingleInstanceLock()) {
   process.exit(0);
 }
 
-let win: BrowserWindow | null = null;
-
 const preload = join(__dirname, "../preload/index.js");
 const url = process.env.VITE_DEV_SERVER_URL;
 const indexHtml = join(process.env.DIST, "index.html");
 
 let dbConnection: lancedb.Connection;
-const dbTable = new LanceDBTableWrapper();
-const fileWatcher: FSWatcher | null = null;
 
 async function createWindow() {
-  win = new BrowserWindow({
-    title: "Main window",
+  const { x, y } = getNextWindowPosition();
+  const { width, height } = getWindowSize();
+  const win = new BrowserWindow({
+    title: "Reor",
+    x: x,
+    y: y,
     webPreferences: {
       preload,
     },
@@ -73,8 +77,8 @@ async function createWindow() {
       symbolColor: "#74b1be",
       height: 30,
     },
-    width: 1200,
-    height: 800,
+    width: width,
+    height: height,
   });
 
   if (url) {
@@ -86,26 +90,33 @@ async function createWindow() {
     win.loadFile(indexHtml);
   }
 
-  // Test actively push message to the Electron-Renderer
-  win.webContents.on("did-finish-load", () => {
-    win?.webContents.send("main-process-message", new Date().toLocaleString());
-    const userDirectory = store.get(StoreKeys.UserDirectory) as string;
-    const files = GetFilesInfoTree(userDirectory);
-    win?.webContents.send("files-list", files);
-  });
-
   // Make all links open with the browser, not with the application
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https:")) shell.openExternal(url);
     return { action: "deny" };
   });
 
-  // Apply electron-updater
-  update(win);
-  registerLLMSessionHandlers(store);
-  registerDBSessionHandlers(dbTable, store);
-  registerStoreHandlers(store, fileWatcher);
-  registerFileHandlers(store, dbTable, win);
+  win.on("close", () => {
+    // Get the directory for this window's contents
+    const directoryToSave = getVaultDirectoryForContents(
+      activeWindows,
+      win.webContents
+    );
+
+    // Save the directory if found
+    if (directoryToSave) {
+      console.log("Saving directory for window:", directoryToSave);
+      store.set(StoreKeys.DirectoryFromPreviousSession, directoryToSave);
+    }
+  });
+
+  if (activeWindows.length <= 0) {
+    update(win);
+    registerLLMSessionHandlers(store);
+    registerDBSessionHandlers(store);
+    registerStoreHandlers(store);
+    registerFileHandlers();
+  }
 }
 
 app.whenReady().then(async () => {
@@ -113,17 +124,17 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  win = null;
+  // win = null;
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("second-instance", () => {
-  if (win) {
-    // Focus on the main window if the user tried to open another
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  }
-});
+// app.on("second-instance", () => {
+//   if (windows) {
+//     // Focus on the main window if the user tried to open another
+//     if (win.isMinimized()) win.restore();
+//     win.focus();
+//   }
+// });
 
 app.on("activate", () => {
   const allWindows = BrowserWindow.getAllWindows();
@@ -131,23 +142,6 @@ app.on("activate", () => {
     allWindows[0].focus();
   } else {
     createWindow();
-  }
-});
-
-// New window example arg: new windows url
-ipcMain.handle("open-win", (_, arg) => {
-  const childWindow = new BrowserWindow({
-    webPreferences: {
-      preload,
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
-  });
-
-  if (process.env.VITE_DEV_SERVER_URL) {
-    childWindow.loadURL(`${url}#${arg}`);
-  } else {
-    childWindow.loadFile(indexHtml, { hash: arg });
   }
 });
 
@@ -180,9 +174,9 @@ ipcMain.handle("open-file-dialog", async (event, extensions) => {
 
 ipcMain.on("index-files-in-directory", async (event) => {
   try {
-    const userDirectory = store.get(StoreKeys.UserDirectory) as string;
-    if (!userDirectory) {
-      throw new Error("No user directory set");
+    const windowInfo = getWindowInfoForContents(activeWindows, event.sender);
+    if (!windowInfo) {
+      throw new Error("No window info found");
     }
     const embedFuncRepoName = store.get(
       StoreKeys.DefaultEmbedFuncRepo
@@ -192,17 +186,23 @@ ipcMain.on("index-files-in-directory", async (event) => {
     }
     const dbPath = path.join(app.getPath("userData"), "vectordb");
     dbConnection = await lancedb.connect(dbPath);
-    await dbTable.initialize(dbConnection, userDirectory, embedFuncRepoName);
+    await windowInfo.dbTableClient.initialize(
+      dbConnection,
+      windowInfo.vaultDirectoryForWindow,
+      embedFuncRepoName
+    );
     await RepopulateTableWithMissingItems(
-      dbTable,
-      userDirectory,
+      windowInfo.dbTableClient,
+      windowInfo.vaultDirectoryForWindow,
       (progress) => {
         event.sender.send("indexing-progress", progress);
       }
     );
+    const win = BrowserWindow.fromWebContents(event.sender);
+
     if (win) {
-      startWatchingDirectory(win, userDirectory);
-      updateFileListForRenderer(win, userDirectory);
+      startWatchingDirectory(win, windowInfo.vaultDirectoryForWindow);
+      updateFileListForRenderer(win, windowInfo.vaultDirectoryForWindow);
     }
     event.sender.send("indexing-progress", 1);
   } catch (error) {
@@ -264,6 +264,10 @@ ipcMain.on("open-external", (event, url) => {
 
 ipcMain.handle("get-platform", async () => {
   return process.platform;
+});
+
+ipcMain.on("open-new-window", () => {
+  createWindow();
 });
 
 ipcMain.handle("path-basename", (event, pathString: string) => {
