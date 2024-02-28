@@ -3,6 +3,7 @@ import {
   EmbeddingModelConfig,
   EmbeddingModelWithLocalPath,
   EmbeddingModelWithRepo,
+  HardwareConfig,
   LLMModelConfig,
 } from "electron/main/Store/storeConfig";
 import { FileInfoNode, FileInfoTree } from "electron/main/Files/Types";
@@ -79,6 +80,10 @@ declare global {
         modelName: string,
         modelConfig: LLMModelConfig
       ) => Promise<void>;
+      deleteLocalLLM: (
+        modelName: string,
+        modelConfig: LLMModelConfig
+      ) => Promise<void>;
       setDefaultLLM: (modelName: string) => void;
       getDefaultLLM: () => string;
       getDefaultEmbeddingModel: () => string;
@@ -93,6 +98,8 @@ declare global {
       removeEmbeddingModel: (modelName: string) => void;
       getNoOfRAGExamples: () => number;
       setNoOfRAGExamples: (noOfExamples: number) => void;
+      getHardwareConfig: () => HardwareConfig;
+      setHardwareConfig: (config: HardwareConfig) => void;
     };
   }
 }
@@ -147,6 +154,9 @@ contextBridge.exposeInMainWorld("electronStore", {
   setupNewLLM: async (modelName: string, modelConfig: LLMModelConfig) => {
     return ipcRenderer.invoke("setup-new-llm", modelName, modelConfig);
   },
+  deleteLocalLLM: async (modelName: string, modelConfig: LLMModelConfig) => {
+    return ipcRenderer.invoke("delete-local-llm", modelName, modelConfig);
+  },
   setDefaultLLM: (modelName: string) => {
     ipcRenderer.send("set-default-llm", modelName);
   },
@@ -186,6 +196,12 @@ contextBridge.exposeInMainWorld("electronStore", {
   },
   setNoOfRAGExamples: (noOfExamples: number) => {
     ipcRenderer.send("set-no-of-rag-examples", noOfExamples);
+  },
+  getHardwareConfig: () => {
+    return ipcRenderer.sendSync("get-hardware-config");
+  },
+  setHardwareConfig: (config: HardwareConfig) => {
+    ipcRenderer.send("set-hardware-config", config);
   },
 });
 
